@@ -7,6 +7,8 @@ from torch.nn.utils.rnn import pad_packed_sequence
 import numpy as np
 from utils import cc 
 from utils import gumbel_softmax 
+from utils import _sequence_mask 
+from utils import KLDiv 
 
 def _get_enc_output_dim(cell_size=512, num_layers=1, bidirectional=True):
     return cell_size * num_layers * (int(bidirectional) + 1)
@@ -61,7 +63,7 @@ class EmbeddingLayer(torch.nn.Module):
             logits = logits / torch.norm(torch.t(self.embedding.weight), p=2, dim=-1)
         logits = logits.contiguous().view(logits.size(0), self.n_heads, self.n_embedding)
         gumbel_distr = gumbel_softmax(logits, temperature=temperature)
-        distr = F.softmax(logits, dim=-1)
+        distr = F.softmax(logits, dim=logits.dim()-1)
         output = self.embedding(gumbel_distr.contiguous().view(-1, self.n_heads*self.n_embedding))
         return gumbel_distr, distr, output
 
@@ -110,7 +112,7 @@ class Decoder(torch.nn.Module):
         outputs = []
         for step in range(max_steps):
             # uniform scheduled sampling
-            if torch.bernoulli(self.tf_rate):
+            if torch.bernoulli(self.tf_rate) or step == 0:
                 inp = decoder_inputs[:, step:step+1, :]
             else:
                 inp = outputs[-1]
@@ -122,9 +124,10 @@ class Decoder(torch.nn.Module):
 
 class DIVAE(torch.nn.Module):
     def __init__(self, input_size=513, encoder_cell_size=512, num_encoder_layers=1, rnn_cell='lstm', 
-            bidirectional=True, embedding_size=512, n_heads=4, n_embedding=100, 
-            decoder_cell_size=512, teacher_force=0.9):
+            bidirectional=True, embedding_size=512, n_heads=4, n_embedding=50, 
+            decoder_cell_size=512, teacher_force=0.9, trainable_prior=False):
         super(DIVAE, self).__init__()
+        self.n_embedding = n_embedding
         self.encoder = Encoder(input_size=input_size, cell_size=encoder_cell_size, num_layers=num_encoder_layers, 
                 rnn_cell=rnn_cell, bidirectional=bidirectional)
         self.encoder_projection = EncoderProjectLayer(
@@ -137,6 +140,10 @@ class DIVAE(torch.nn.Module):
                 rnn_cell=rnn_cell)
         self.decoder = Decoder(input_size=input_size, cell_size=decoder_cell_size, output_size=input_size,
                 rnn_cell=rnn_cell, teacher_force=teacher_force)
+        # make uniform distribution
+        self.uniform_log_py = nn.Parameter(torch.log(torch.ones(n_heads, self.n_embedding) / self.n_embedding),
+                requires_grad=trainable_prior)
+        print(torch.sum(torch.exp(self.uniform_log_py), dim=1))
 
     def forward(self, x, ilens):
         enc_output, state, ilens = self.encoder(x, ilens)
@@ -144,7 +151,16 @@ class DIVAE(torch.nn.Module):
         gumbel_distr, distr, context = self.embedding_layer(query)
         dec_init = self.decoder_projection(context)
         dec_output = self.decoder(x[:, :-1], dec_init)
-        print(dec_output.size())
+        # calculate loss
+        dec_target = x[:, 1:]
+        loss_per_timestep = torch.mean((dec_output - dec_target) ** 2, dim=-1)
+        mask = cc(_sequence_mask(ilens - 1, max_len=x.size(1) - 1))
+        total_length = cc(torch.sum(ilens).type(torch.FloatTensor))
+        rec_loss = torch.sum(loss_per_timestep * mask) / total_length
+        avg_qy = torch.mean(distr, dim=0)
+        avg_log_qy = torch.log(avg_qy + 1e-20)
+        kl_loss = KLDiv(avg_log_qy, self.uniform_log_py, batch_size=x.size(0), unit_average=False)
+        print(kl_loss)
 
 if __name__ == '__main__':
     net = cc(DIVAE())
