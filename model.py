@@ -5,10 +5,10 @@ from torch.autograd import Variable
 from torch.nn.utils.rnn import pack_padded_sequence
 from torch.nn.utils.rnn import pad_packed_sequence
 import numpy as np
-from utils import cc 
-from utils import gumbel_softmax 
-from utils import _sequence_mask 
-from utils import KLDiv 
+from nn_lib import cc 
+from nn_lib import gumbel_softmax 
+from nn_lib import _sequence_mask 
+from nn_lib import KLDiv 
 
 def _get_enc_output_dim(cell_size=512, num_layers=1, bidirectional=True):
     return cell_size * num_layers * (int(bidirectional) + 1)
@@ -143,7 +143,6 @@ class DIVAE(torch.nn.Module):
         # make uniform distribution
         self.uniform_log_py = nn.Parameter(torch.log(torch.ones(n_heads, self.n_embedding) / self.n_embedding),
                 requires_grad=trainable_prior)
-        print(torch.sum(torch.exp(self.uniform_log_py), dim=1))
 
     def forward(self, x, ilens):
         enc_output, state, ilens = self.encoder(x, ilens)
@@ -159,11 +158,12 @@ class DIVAE(torch.nn.Module):
         rec_loss = torch.sum(loss_per_timestep * mask) / total_length
         avg_qy = torch.mean(distr, dim=0)
         avg_log_qy = torch.log(avg_qy + 1e-20)
-        kl_loss = KLDiv(avg_log_qy, self.uniform_log_py, batch_size=x.size(0), unit_average=False)
-        print(kl_loss)
+        kl_loss = KLDiv(avg_log_qy, self.uniform_log_py, batch_size=x.size(0), unit_average=True)
+        return rec_loss, kl_loss
 
 if __name__ == '__main__':
     net = cc(DIVAE())
     data = cc(torch.randn(64, 30, 513))
     ilens = np.ones((64,), dtype=np.int64) * 25
-    net(data, ilens)
+    rec_loss, kl_loss = net(data, ilens)
+    print(rec_loss, kl_loss)

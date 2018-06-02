@@ -44,7 +44,6 @@ def _sequence_mask(sequence_length, max_len=None):
 
 def KLDiv(log_qy, log_py, batch_size=None, unit_average=False):
     qy = torch.exp(log_qy)
-    print(torch.sum(qy, dim=1))
     y_kl = torch.sum(qy * (log_qy - log_py), dim=1)
     if unit_average:
         return torch.mean(y_kl)
